@@ -302,12 +302,22 @@ class LocalStorage(BaseStorage):
         download_dir = get_download_dir(run_id=run_id)
         file_infos: list[FileInfo] = []
         files_and_folders = os.listdir(download_dir)
+
+        original_filename_mapping = {}
+        try:
+            from skyvern.webeye.browser_factory import _load_original_filename_mapping  # noqa: PLC0415
+
+            original_filename_mapping = _load_original_filename_mapping(run_id, None)
+        except Exception:
+            LOG.debug("Could not load original filename mapping for local storage", exc_info=True)
+
         for file_or_folder in files_and_folders:
             path = os.path.join(download_dir, file_or_folder)
             if os.path.isfile(path):
                 # Calculate checksum for the file
                 checksum = calculate_sha256_for_file(path)
-                file_info = FileInfo(url=f"file://{path}", checksum=checksum, filename=file_or_folder)
+                original_filename = original_filename_mapping.get(file_or_folder, file_or_folder)
+                file_info = FileInfo(url=f"file://{path}", checksum=checksum, filename=original_filename)
                 file_infos.append(file_info)
         return file_infos
 

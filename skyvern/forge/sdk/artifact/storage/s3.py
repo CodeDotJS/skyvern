@@ -381,24 +381,36 @@ class S3Storage(BaseStorage):
         base_uri = (
             f"s3://{settings.AWS_S3_BUCKET_UPLOADS}/{DOWNLOAD_FILE_PREFIX}/{settings.ENV}/{organization_id}/{run_id}"
         )
+
+        original_filename_mapping = {}
+        try:
+            from skyvern.webeye.browser_factory import _load_original_filename_mapping  # noqa: PLC0415
+
+            original_filename_mapping = _load_original_filename_mapping(run_id, None)
+        except Exception:
+            LOG.debug("Could not load original filename mapping for S3 storage", exc_info=True)
+
         for file in files:
             fpath = os.path.join(download_dir, file)
             if not os.path.isfile(fpath):
                 continue
             uri = f"{base_uri}/{file}"
             checksum = calculate_sha256_for_file(fpath)
+
+            original_filename = original_filename_mapping.get(file, file)
+
             LOG.info(
                 "Calculated checksum for file",
                 file=file,
+                original_filename=original_filename,
                 checksum=checksum,
                 organization_id=organization_id,
                 storage_class=sc,
             )
-            # Upload file with checksum metadata
             await self.async_client.upload_file_from_path(
                 uri=uri,
                 file_path=fpath,
-                metadata={"sha256_checksum": checksum, "original_filename": file},
+                metadata={"sha256_checksum": checksum, "original_filename": original_filename},
                 storage_class=sc,
                 tags=tags,
             )

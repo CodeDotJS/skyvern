@@ -553,6 +553,26 @@ class ForgeAgent:
                             with open(os.path.join(workflow_download_directory, file), "wb") as f:
                                 f.write(file_data)
 
+                        file_path_obj = Path(file)
+                        if file_path_obj.is_absolute() or os.sep in file or (os.altsep and os.altsep in file):
+                            file = file_path_obj.name
+
+                        try:
+                            file_relative = os.path.relpath(file, str(workflow_download_directory))
+                            if file_relative != file and not file_relative.startswith(".."):
+                                file = os.path.basename(file_relative)
+                        except Exception:
+                            file = os.path.basename(file)
+
+                        if file.startswith(".") and (".metadata.json" in file or file == ".original_filenames.json"):
+                            LOG.debug(
+                                "Skipping metadata file from renaming",
+                                file=file,
+                                task_id=task.task_id,
+                                workflow_run_id=task.workflow_run_id,
+                            )
+                            continue
+
                         file_extension = Path(file).suffix
                         if file_extension == BROWSER_DOWNLOADING_SUFFIX:
                             LOG.warning(
@@ -563,20 +583,25 @@ class ForgeAgent:
                             )
                             continue
 
+                        download_pattern = re.compile(r"^download-[a-zA-Z0-9_-]+-[A-Z0-9]{4}\.")
+                        if download_pattern.match(file):
+                            LOG.info(
+                                "File already has correct format, skipping rename",
+                                file=file,
+                                task_id=task.task_id,
+                                workflow_run_id=task.workflow_run_id,
+                            )
+                            continue
+
                         if task_block.download_suffix:
-                            # Use download_suffix as the complete filename (without extension)
                             final_file_name = task_block.download_suffix
                         else:
-                            # Fallback to random filename if no download_suffix provided
                             random_file_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
                             final_file_name = f"download-{datetime.now().strftime('%Y%m%d%H%M%S%f')}-{random_file_id}"
 
-                        # Check if file with this name already exists
-                        final_file_name = final_file_name
                         target_path = os.path.join(workflow_download_directory, final_file_name + file_extension)
                         counter = 1
                         while os.path.exists(target_path):
-                            # If file exists, append counter to filename
                             final_file_name = f"{final_file_name}_{counter}"
                             target_path = os.path.join(workflow_download_directory, final_file_name + file_extension)
                             counter += 1

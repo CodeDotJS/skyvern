@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
 import platform
@@ -8,13 +9,14 @@ import random
 import re
 import shutil
 import socket
+import string
 import subprocess
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol, cast
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import psutil
 import structlog
@@ -64,6 +66,92 @@ def set_browser_console_log(browser_context: BrowserContext, browser_artifacts: 
     browser_context.on("console", browser_console_log)
 
 
+def _get_original_filename_mapping_file_path(workflow_run_id: str | None, task_id: str | None) -> Path:
+    """Get the path to the JSON file that stores original filename mappings."""
+    from skyvern.forge.sdk.api.files import get_download_dir  # noqa: PLC0415
+
+    run_id = workflow_run_id or task_id
+    download_dir = get_download_dir(run_id=run_id)
+    return Path(download_dir) / ".original_filenames.json"
+
+
+def _load_original_filename_mapping(workflow_run_id: str | None, task_id: str | None) -> dict[str, str]:
+    """Load the original filename mapping from JSON file."""
+    mapping_file = _get_original_filename_mapping_file_path(workflow_run_id, task_id)
+    if mapping_file.exists():
+        try:
+            with open(mapping_file) as f:
+                return json.load(f)
+        except Exception:
+            LOG.warning("Failed to load original filename mapping", exc_info=True)
+    return {}
+
+
+def _save_original_filename_mapping(workflow_run_id: str | None, task_id: str | None, mapping: dict[str, str]) -> None:
+    """Save the original filename mapping to JSON file."""
+    mapping_file = _get_original_filename_mapping_file_path(workflow_run_id, task_id)
+    try:
+        with open(mapping_file, "w") as f:
+            json.dump(mapping, f)
+    except Exception:
+        LOG.warning("Failed to save original filename mapping", exc_info=True)
+
+
+def _get_original_filename_from_download(download: Download, url: str) -> str | None:
+    """Extract the original filename from download object or URL."""
+    if download.suggested_filename:
+        suggested = download.suggested_filename.replace("\\", "/")
+        suggested = os.path.basename(suggested)
+        if suggested:
+            return suggested
+
+    try:
+        parsed_url = urlparse(url)
+        parsed_qs = parse_qsl(parsed_url.query)
+        for key, value in parsed_qs:
+            if key.lower() in ["filename", "file", "name"]:
+                decoded_value = unquote(value)
+                if decoded_value and "." in decoded_value:
+                    return os.path.basename(decoded_value)
+    except Exception:
+        pass
+
+    try:
+        parsed_url = urlparse(url)
+        path_filename = os.path.basename(parsed_url.path)
+        if path_filename and "." in path_filename:
+            decoded = unquote(path_filename)
+            if decoded:
+                return decoded
+    except Exception:
+        pass
+
+    return None
+
+
+def _generate_final_filename(original_filename: str | None, file_extension: str) -> str:
+    """Generate the final filename in format: download-{sanitized_name}-{random_id}.{ext}"""
+    if original_filename:
+        original_name_base = Path(original_filename).stem
+        sanitized_name = "".join(c for c in original_name_base if c.isalnum() or c in ["-", "_", " "])
+        sanitized_name = sanitized_name.replace(" ", "-")
+        if len(sanitized_name) > 50:
+            sanitized_name = sanitized_name[:50]
+
+        random_file_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+
+        if sanitized_name:
+            final_file_name = f"download-{sanitized_name}-{random_file_id}"
+        else:
+            random_file_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+            final_file_name = f"download-{datetime.now().strftime('%Y%m%d%H%M%S%f')}-{random_file_id}"
+    else:
+        random_file_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        final_file_name = f"download-{datetime.now().strftime('%Y%m%d%H%M%S%f')}-{random_file_id}"
+
+    return final_file_name + file_extension
+
+
 def set_download_file_listener(
     browser_context: BrowserContext, download_timeout: float | None = None, **kwargs: Any
 ) -> None:
@@ -73,53 +161,101 @@ def set_download_file_listener(
         try:
             async with asyncio.timeout(download_timeout or BROWSER_DOWNLOAD_TIMEOUT):
                 file_path = await download.path()
-                if file_path.suffix:
-                    return
 
-                LOG.info(
-                    "No file extensions, going to add file extension automatically",
-                    workflow_run_id=workflow_run_id,
-                    task_id=task_id,
-                    suggested_filename=download.suggested_filename,
-                    url=download.url,
-                )
-                suffix = Path(download.suggested_filename).suffix
-                if suffix:
+                original_filename = _get_original_filename_from_download(download, download.url)
+                file_name = file_path.name
+
+                if original_filename:
+                    mapping = _load_original_filename_mapping(workflow_run_id, task_id)
+                    mapping[file_name] = original_filename
+                    _save_original_filename_mapping(workflow_run_id, task_id, mapping)
                     LOG.info(
-                        "Add extension according to suggested filename",
+                        "Stored original filename mapping",
                         workflow_run_id=workflow_run_id,
                         task_id=task_id,
-                        filepath=str(file_path) + suffix,
+                        file_name=file_name,
+                        original_filename=original_filename,
                     )
-                    file_path.rename(str(file_path) + suffix)
-                    return
-
-                parsed_url = urlparse(download.url)
-                parsed_qs = parse_qsl(parsed_url.query)
-                for key, value in parsed_qs:
-                    if key.lower() == "filename":
-                        suffix = Path(value).suffix
-                        if suffix:
-                            LOG.info(
-                                "Add extension according to the parsed query params of download url",
-                                workflow_run_id=workflow_run_id,
-                                task_id=task_id,
-                                filename=value,
-                            )
-                            file_path.rename(str(file_path) + suffix)
-                            return
-
-                suffix = Path(parsed_url.path).suffix
-                if suffix:
-                    LOG.info(
-                        "Add extension according to download url path",
+                else:
+                    LOG.debug(
+                        "Could not extract original filename from download",
                         workflow_run_id=workflow_run_id,
                         task_id=task_id,
-                        filepath=str(file_path) + suffix,
+                        file_name=file_name,
+                        suggested_filename=download.suggested_filename,
+                        url=download.url,
                     )
-                    file_path.rename(str(file_path) + suffix)
-                    return
-                # TODO: maybe should try to parse it from URL response
+
+                file_extension = file_path.suffix
+
+                if not file_extension:
+                    LOG.info(
+                        "No file extensions, going to add file extension automatically",
+                        workflow_run_id=workflow_run_id,
+                        task_id=task_id,
+                        suggested_filename=download.suggested_filename,
+                        url=download.url,
+                    )
+
+                    suffix = Path(download.suggested_filename).suffix if download.suggested_filename else ""
+                    if suffix:
+                        file_extension = suffix
+                    else:
+                        parsed_url = urlparse(download.url)
+                        parsed_qs = parse_qsl(parsed_url.query)
+                        for key, value in parsed_qs:
+                            if key.lower() == "filename":
+                                suffix = Path(value).suffix
+                                if suffix:
+                                    file_extension = suffix
+                                    break
+
+                        # Try URL path
+                        if not file_extension:
+                            suffix = Path(parsed_url.path).suffix
+                            if suffix:
+                                file_extension = suffix
+
+                # Now rename to final format: download-{original_name}-{random_id}.{ext}
+                final_filename = _generate_final_filename(original_filename, file_extension)
+                final_file_path = file_path.parent / final_filename
+
+                # Handle filename collisions
+                counter = 1
+                while final_file_path.exists():
+                    name_without_ext = Path(final_filename).stem
+                    ext = Path(final_filename).suffix
+                    final_filename = f"{name_without_ext}_{counter}{ext}"
+                    final_file_path = file_path.parent / final_filename
+                    counter += 1
+
+                # Rename the file to final format
+                file_path.rename(final_file_path)
+
+                if original_filename:
+                    mapping = _load_original_filename_mapping(workflow_run_id, task_id)
+                    if file_name in mapping:
+                        del mapping[file_name]
+                    mapping[final_filename] = original_filename
+                    _save_original_filename_mapping(workflow_run_id, task_id, mapping)
+                    LOG.info(
+                        "Renamed file to final format with original filename",
+                        workflow_run_id=workflow_run_id,
+                        task_id=task_id,
+                        old_file_name=file_name,
+                        final_filename=final_filename,
+                        original_filename=original_filename,
+                    )
+                else:
+                    LOG.info(
+                        "Renamed file to final format (no original filename available)",
+                        workflow_run_id=workflow_run_id,
+                        task_id=task_id,
+                        old_file_name=file_name,
+                        final_filename=final_filename,
+                    )
+
+                return
         except asyncio.TimeoutError:
             LOG.error(
                 "timeout to download file, going to cancel the download",
