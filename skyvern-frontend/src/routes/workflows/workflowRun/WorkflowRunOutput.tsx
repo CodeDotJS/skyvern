@@ -50,11 +50,39 @@ function WorkflowRunOutput() {
     activeBlock.status === Status.Completed;
 
   const outputs = workflowRun?.outputs;
-  const fileUrls = workflowRun?.downloaded_file_urls ?? [];
+  const fileUrls = (workflowRun?.downloaded_file_urls ?? []).filter(
+    (url) => !url.includes(".original_filenames.json"),
+  );
   const observerOutput = workflowRun?.task_v2?.output;
   const webhookFailureReasonData =
     workflowRun?.task_v2?.webhook_failure_reason ??
     workflowRun?.webhook_failure_reason;
+
+  function getFilenameFromUrl(url: string, index: number): string {
+    try {
+      const urlObj = new URL(url);
+      const pathname = urlObj.pathname;
+      const filename = pathname.split("/").pop() || "";
+      // If filename exists and is not empty, use it; otherwise fall back to index
+      if (filename && filename.includes(".")) {
+        // Decode URL-encoded characters
+        return decodeURIComponent(filename);
+      }
+    } catch {
+      // If URL parsing fails, try to extract from string
+      const parts = url.split("/");
+      const lastPart = parts[parts.length - 1];
+      if (lastPart && lastPart.includes(".")) {
+        const filenamePart = lastPart.split("?")[0] || lastPart;
+        try {
+          return decodeURIComponent(filenamePart);
+        } catch {
+          return filenamePart;
+        }
+      }
+    }
+    return `File ${index + 1}`;
+  }
 
   return (
     <div className="space-y-5">
@@ -152,10 +180,8 @@ function WorkflowRunOutput() {
           <h1 className="text-lg font-bold">Workflow Run Downloaded Files</h1>
           <div className="space-y-2">
             {fileUrls.length > 0 ? (
-              fileUrls.map((url) => {
-                // Extract filename from URL path, stripping query params from signed URLs
-                const urlPath = url.split("?")[0] ?? url;
-                const filename = urlPath.split("/").pop() || "download";
+              fileUrls.map((url, index) => {
+                const filename = getFilenameFromUrl(url, index);
                 return (
                   <div key={url} title={url} className="flex gap-2">
                     <FileIcon className="size-6" />

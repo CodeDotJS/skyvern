@@ -284,8 +284,36 @@ function WorkflowRun() {
     workflowRun.downloaded_file_urls &&
     workflowRun.downloaded_file_urls.length > 0;
   const fileUrls = hasFileUrls
-    ? (workflowRun.downloaded_file_urls as string[])
+    ? (workflowRun.downloaded_file_urls as string[]).filter(
+        (url) => !url.includes(".original_filenames.json"),
+      )
     : [];
+
+  function getFilenameFromUrl(url: string, index: number): string {
+    try {
+      const urlObj = new URL(url);
+      const pathname = urlObj.pathname;
+      const filename = pathname.split("/").pop() || "";
+      // If filename exists and is not empty, use it; otherwise fall back to index
+      if (filename && filename.includes(".")) {
+        // Decode URL-encoded characters
+        return decodeURIComponent(filename);
+      }
+    } catch {
+      // If URL parsing fails, try to extract from string
+      const parts = url.split("/");
+      const lastPart = parts[parts.length - 1];
+      if (lastPart && lastPart.includes(".")) {
+        const filenamePart = lastPart.split("?")[0] || lastPart;
+        try {
+          return decodeURIComponent(filenamePart);
+        } catch {
+          return filenamePart;
+        }
+      }
+    }
+    return `File ${index + 1}`;
+  }
 
   const showBoth =
     (hasSomeExtractedInformation || hasTaskv2Output) && hasFileUrls;
@@ -477,10 +505,8 @@ function WorkflowRun() {
               <ScrollArea>
                 <ScrollAreaViewport className="max-h-[250px] space-y-2">
                   {fileUrls.length > 0 ? (
-                    fileUrls.map((url) => {
-                      // Extract filename from URL path, stripping query params from signed URLs
-                      const urlPath = url.split("?")[0] ?? url;
-                      const filename = urlPath.split("/").pop() || "download";
+                    fileUrls.map((url, index) => {
+                      const filename = getFilenameFromUrl(url, index);
                       return (
                         <div key={url} title={url} className="flex gap-2">
                           <FileIcon className="size-6" />
